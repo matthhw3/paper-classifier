@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+.cache/
+.DS_Store
+
+# data stays local
+*.csv
+*.xlsx
+*.xls
+*.parquet
+*.pdf
+output/
+models/
+*.joblib

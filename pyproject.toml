@@ -1,0 +1,22 @@
+[project]
+name = "paper-classifier"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "matthhw3", email = "217376750+matthhw3@users.noreply.github.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "pandas>=3.1.1",
+    "pypdf>=7.0.1",
+    "requests>=2.34.2",
+    "scikit-learn>=1.9.1",
+]
+
+[project.scripts]
+paper-classifier = "paper_classifier:main"
+
+[build-system]
+requires = ["uv_build>=0.13.0,<0.14.0"]
+build-backend = "uv_build"
