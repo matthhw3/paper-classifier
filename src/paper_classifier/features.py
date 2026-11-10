@@ -65,12 +65,14 @@ PUBLISHER_PDF = {
 }
 
 
-def pdf_candidates(rec: dict) -> list[str]:
+def pdf_candidates(rec: dict, publisher: bool = False) -> list[str]:
+    """Open-access PDF first; publisher links only if explicitly enabled (and permitted)."""
     urls = [rec.get("pdf_url")] if rec.get("pdf_url") else []
     doi = rec.get("doi") or ""
-    for prefix, pattern in PUBLISHER_PDF.items():
-        if doi.startswith(prefix):
-            urls.append(pattern.format(doi=doi))
+    if publisher:
+        for prefix, pattern in PUBLISHER_PDF.items():
+            if doi.startswith(prefix):
+                urls.append(pattern.format(doi=doi))
     return list(dict.fromkeys(urls))
 
 
@@ -82,7 +84,7 @@ class FullText:
     """
 
     def __init__(self, cache_dir: str | Path = ".cache", max_mb: int = 25, max_pages: int = 40,
-                 delay: float = 15.0, limit: int = 40):
+                 delay: float = 15.0, limit: int = 40, publisher: bool = False):
         self.path = Path(cache_dir) / "fulltext_signals.json"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.cache: dict = json.loads(self.path.read_text()) if self.path.exists() else {}
@@ -90,6 +92,7 @@ class FullText:
         self.max_pages = max_pages
         self.delay = delay
         self.remaining = limit
+        self.publisher = publisher
         self._last = 0.0
         self.session = requests.Session()
         self.session.headers["User-Agent"] = "Mozilla/5.0 (paper-classifier research tool)"
@@ -99,7 +102,7 @@ class FullText:
 
     def signals_for(self, rec: dict) -> dict[str, int] | None:
         """Try each candidate PDF URL for a paper; returns cached results without network use."""
-        for url in pdf_candidates(rec):
+        for url in pdf_candidates(rec, self.publisher):
             if url in self.cache:
                 if self.cache[url]:
                     return self.cache[url]
