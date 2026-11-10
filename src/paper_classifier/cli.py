@@ -12,11 +12,12 @@ from __future__ import annotations
 
 import argparse
 import random
+import re
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import StratifiedGroupKFold
 
 from .features import FullText
 from .io import extract_ids, find_link_column, load_sheet, parse_label
@@ -53,6 +54,49 @@ def add_fulltext(recs: list[dict], idx: list[int], args) -> None:
             print(f"  full text: {n}/{len(idx)} checked, {got} readable, {ft.remaining} requests left", flush=True)
 
 
+def _norm(text: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", (text or "").lower())
+
+
+def _keys(rec: dict) -> set[str]:
+    """Identity keys used to spot the same paper appearing twice."""
+    keys = set()
+    if rec.get("doi"):
+        keys.add("doi:" + rec["doi"].lower())
+    if len(_norm(rec.get("title"))) > 15:
+        keys.add("title:" + _norm(rec.get("title"))[:120])
+    if len(_norm(rec.get("abstract"))) > 200:
+        keys.add("abs:" + _norm(rec.get("abstract"))[:300])
+    return keys
+
+
+def duplicate_groups(recs: list[dict]) -> np.ndarray:
+    """Union papers sharing any identity key into one group id."""
+    parent = list(range(len(recs)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    seen: dict[str, int] = {}
+    for i, r in enumerate(recs):
+        for k in _keys(r):
+            if k in seen:
+                parent[find(i)] = find(seen[k])
+            else:
+                seen[k] = i
+    return np.array([find(i) for i in range(len(recs))])
+
+
+def assert_no_overlap(recs: list[dict], train_idx, test_idx) -> None:
+    train_keys = set().union(*(_keys(recs[i]) for i in train_idx))
+    leaks = [i for i in test_idx if _keys(recs[i]) & train_keys]
+    if leaks:
+        raise RuntimeError(f"contamination: {len(leaks)} test papers also appear in training")
+
+
 def _without_fulltext(recs: list[dict]) -> list[dict]:
     return [{k: v for k, v in r.items() if k != "fulltext"} for r in recs]
 
@@ -74,13 +118,20 @@ def cmd_run(args) -> None:
         add_fulltext(recs, sample, args)
 
     # Cross-validate on the labeled sample; every fold also trains on all labeled papers outside the sample.
+    # Duplicates (same DOI/title/abstract) share a group and never straddle train and test.
+    groups = duplicate_groups(recs)
     test = np.array([i for i in sample if labels[i] is not None])
-    outside = [i for i in range(len(recs)) if labels[i] is not None and i not in set(sample)]
+    sample_groups = set(groups[test])
+    outside = [i for i in range(len(recs)) if labels[i] is not None and groups[i] not in sample_groups]
+    n_dropped = sum(1 for i in range(len(recs)) if labels[i] is not None and i not in set(sample) and groups[i] in sample_groups)
+    print(f"training pool outside sample: {len(outside)} labeled papers ({n_dropped} dropped as duplicates of sample papers)")
     y = labels.astype(object)
     probs = {m: np.zeros(len(test)) for m in ("baseline", "enhanced_no_fulltext", "enhanced")}
-    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=args.seed)
-    for tr, te in skf.split(test, y[test].astype(int)):
+    skf = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=args.seed)
+    for fold, (tr, te) in enumerate(skf.split(test, y[test].astype(int), groups[test]), 1):
         train_idx = outside + list(test[tr])
+        assert_no_overlap(recs, train_idx, test[te])
+        print(f"  fold {fold}: train {len(train_idx)}, test {len(te)}, overlap check passed", flush=True)
         ytr = y[train_idx].astype(int)
         tr_recs = [recs[i] for i in train_idx]
         te_recs = [recs[i] for i in test[te]]
