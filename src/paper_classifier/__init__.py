@@ -1,2 +1,3 @@
-def main() -> None:
-    print("Hello from paper-classifier!")
+from .cli import main
+
+__all__ = ["main"]
