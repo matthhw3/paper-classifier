@@ -5,19 +5,20 @@ from __future__ import annotations
 import difflib
 import json
 import os
+import re
 import time
 from pathlib import Path
 
 import requests
 
 API = "https://api.openalex.org/works"
-FIELDS = "id,doi,title,abstract_inverted_index,primary_location,keywords,topics,type,best_oa_location"
+FIELDS = "id,doi,title,abstract_inverted_index,primary_location,keywords,topics,type,open_access,locations"
 BATCH = 50
 
 
 class Resolver:
     def __init__(self, cache_dir: str | Path = ".cache", mailto: str | None = None):
-        self.cache_path = Path(cache_dir) / "openalex.json"
+        self.cache_path = Path(cache_dir) / "openalex_v2.json"
         self.cache_path.parent.mkdir(parents=True, exist_ok=True)
         self.cache: dict = json.loads(self.cache_path.read_text()) if self.cache_path.exists() else {}
         self.session = requests.Session()
@@ -53,7 +54,11 @@ class Resolver:
     def _by_title(self, title: str) -> dict | None:
         k = f"title:{title.lower()}"
         if k not in self.cache:
-            results = self._get({"search": title, "per-page": 3, "select": FIELDS})
+            query = re.sub(r"[^\w\s]", " ", title).strip()
+            try:
+                results = self._get({"search": query, "per-page": 3, "select": FIELDS}) if query else []
+            except requests.HTTPError:
+                results = []
             best = None
             for w in results:
                 ratio = difflib.SequenceMatcher(None, title.lower(), (w.get("title") or "").lower()).ratio()
@@ -90,7 +95,7 @@ def _abstract(inv: dict | None) -> str:
 
 def _simplify(w: dict) -> dict:
     loc = w.get("primary_location") or {}
-    oa = w.get("best_oa_location") or {}
+    pdfs = _oa_pdfs(w.get("locations") or [])
     return {
         "openalex": (w.get("id") or "").rsplit("/", 1)[-1],
         "doi": (w.get("doi") or "").replace("https://doi.org/", "").lower() or None,
@@ -100,5 +105,17 @@ def _simplify(w: dict) -> dict:
         "keywords": "; ".join(k.get("display_name", "") for k in w.get("keywords") or []),
         "topics": "; ".join(t.get("display_name", "") for t in w.get("topics") or []),
         "type": w.get("type") or "",
-        "pdf_url": oa.get("pdf_url"),
+        "is_oa": bool((w.get("open_access") or {}).get("is_oa")),
+        "pdf_urls": pdfs,
+        "pdf_url": pdfs[0] if pdfs else None,
     }
+
+
+def _oa_pdfs(locations: list[dict]) -> list[str]:
+    """Open-access PDF links, repository copies first (publisher sites tend to block scripts)."""
+    found = []
+    for loc in locations:
+        if loc.get("is_oa") and loc.get("pdf_url"):
+            is_repo = ((loc.get("source") or {}).get("type")) == "repository"
+            found.append((0 if is_repo else 1, loc["pdf_url"]))
+    return list(dict.fromkeys(u for _, u in sorted(found, key=lambda t: t[0])))

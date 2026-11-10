@@ -67,7 +67,7 @@ PUBLISHER_PDF = {
 
 def pdf_candidates(rec: dict, publisher: bool = False) -> list[str]:
     """Open-access PDF first; publisher links only if explicitly enabled (and permitted)."""
-    urls = [rec.get("pdf_url")] if rec.get("pdf_url") else []
+    urls = list(rec.get("pdf_urls") or ([rec["pdf_url"]] if rec.get("pdf_url") else []))[:2]
     doi = rec.get("doi") or ""
     if publisher:
         for prefix, pattern in PUBLISHER_PDF.items():
