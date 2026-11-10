@@ -16,6 +16,10 @@ FIELDS = "id,doi,title,abstract_inverted_index,primary_location,keywords,topics,
 BATCH = 50
 
 
+class BudgetExhausted(Exception):
+    """OpenAlex daily allowance used up; stop querying instead of caching false 'not found's."""
+
+
 class Resolver:
     def __init__(self, cache_dir: str | Path = ".cache", mailto: str | None = None):
         self.cache_path = Path(cache_dir) / "openalex_v2.json"
@@ -23,25 +27,41 @@ class Resolver:
         self.cache: dict = json.loads(self.cache_path.read_text()) if self.cache_path.exists() else {}
         self.session = requests.Session()
         self.params = {"mailto": mailto or os.environ.get("OPENALEX_MAILTO", "")}
+        if os.environ.get("OPENALEX_API_KEY"):
+            self.params["api_key"] = os.environ["OPENALEX_API_KEY"]
+        self.exhausted = False
 
     def save(self) -> None:
         self.cache_path.write_text(json.dumps(self.cache))
 
     def _get(self, params: dict) -> list[dict]:
-        for attempt in range(4):
+        if self.exhausted:
+            raise BudgetExhausted
+        for attempt in range(3):
             r = self.session.get(API, params={**self.params, **params}, timeout=30)
-            if r.status_code == 429 or r.status_code >= 500:
+            if r.status_code == 429:
+                if "budget" in r.text.lower():
+                    self.exhausted = True
+                    print("  OpenAlex daily allowance used up; using sheet data for the rest "
+                          "(set OPENALEX_API_KEY for a larger allowance)", flush=True)
+                    raise BudgetExhausted
+                time.sleep(2**attempt)
+                continue
+            if r.status_code >= 500:
                 time.sleep(2**attempt)
                 continue
             r.raise_for_status()
             return r.json().get("results", [])
-        return []
+        raise BudgetExhausted
 
     def _batch(self, key: str, ids: list[str]) -> None:
         todo = [i for i in dict.fromkeys(ids) if f"{key}:{i}" not in self.cache]
         for start in range(0, len(todo), BATCH):
             chunk = todo[start : start + BATCH]
-            results = self._get({"filter": f"{key}:" + "|".join(chunk), "per-page": BATCH, "select": FIELDS})
+            try:
+                results = self._get({"filter": f"{key}:" + "|".join(chunk), "per-page": BATCH, "select": FIELDS})
+            except BudgetExhausted:
+                break
             found = {}
             for w in results:
                 rec = _simplify(w)
@@ -57,6 +77,8 @@ class Resolver:
             query = re.sub(r"[^\w\s]", " ", title).strip()
             try:
                 results = self._get({"search": query, "per-page": 3, "select": FIELDS}) if query else []
+            except BudgetExhausted:
+                return None  # not cached, so it is retried on a later run
             except requests.HTTPError:
                 results = []
             best = None

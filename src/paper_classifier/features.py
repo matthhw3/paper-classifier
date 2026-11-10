@@ -7,6 +7,7 @@ import json
 import re
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 import numpy as np
 import requests
@@ -79,21 +80,24 @@ def pdf_candidates(rec: dict, publisher: bool = False) -> list[str]:
 class FullText:
     """Read PDFs into memory one at a time, keeping only signal counts (no files saved).
 
-    Deliberately slow: a fixed delay between network requests and a hard cap per run,
-    so volume stays at what a single researcher reading papers would generate.
+    Deliberately slow: at least `delay` seconds between requests to the same site, a small
+    gap between any two requests, and a hard cap per run, so each site sees roughly the
+    traffic of one researcher reading papers.
     """
 
     def __init__(self, cache_dir: str | Path = ".cache", max_mb: int = 25, max_pages: int = 40,
-                 delay: float = 15.0, limit: int = 40, publisher: bool = False):
+                 delay: float = 15.0, limit: int = 40, publisher: bool = False, min_gap: float = 2.0):
         self.path = Path(cache_dir) / "fulltext_signals.json"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.cache: dict = json.loads(self.path.read_text()) if self.path.exists() else {}
         self.max_bytes = max_mb * 1024 * 1024
         self.max_pages = max_pages
         self.delay = delay
+        self.min_gap = min_gap
         self.remaining = limit
         self.publisher = publisher
         self._last = 0.0
+        self._last_host: dict[str, float] = {}
         self.session = requests.Session()
         self.session.headers["User-Agent"] = "Mozilla/5.0 (paper-classifier research tool)"
 
@@ -109,12 +113,14 @@ class FullText:
                 continue
             if self.remaining <= 0:
                 return None
-            wait = self.delay - (time.monotonic() - self._last)
+            host = urlparse(url).netloc
+            now = time.monotonic()
+            wait = max(self.min_gap - (now - self._last), self.delay - (now - self._last_host.get(host, -1e9)))
             if wait > 0:
                 time.sleep(wait)
             self.remaining -= 1
             self.cache[url] = self._fetch(url)  # no retries: a refusal is recorded, not repeated
-            self._last = time.monotonic()
+            self._last = self._last_host[host] = time.monotonic()
             self.save()
             if self.cache[url]:
                 return self.cache[url]
