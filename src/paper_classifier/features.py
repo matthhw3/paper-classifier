@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import re
+import time
 from pathlib import Path
 
 import numpy as np
@@ -51,27 +52,70 @@ def signal_matrix(texts: list[str]) -> np.ndarray:
     return np.log1p(m)
 
 
-class FullText:
-    """Fetch open-access PDFs into memory and keep only signal counts (no files saved)."""
+# Publisher PDF URL patterns by DOI prefix (used when institutional access is available).
+PUBLISHER_PDF = {
+    "10.1111/": "https://onlinelibrary.wiley.com/doi/pdfdirect/{doi}",
+    "10.1002/": "https://onlinelibrary.wiley.com/doi/pdfdirect/{doi}",
+    "10.3982/": "https://onlinelibrary.wiley.com/doi/pdfdirect/{doi}",
+    "10.1257/": "https://www.aeaweb.org/articles/pdf/doi/{doi}",
+    "10.1177/": "https://journals.sagepub.com/doi/pdf/{doi}",
+    "10.1287/": "https://pubsonline.informs.org/doi/pdf/{doi}",
+    "10.1080/": "https://www.tandfonline.com/doi/pdf/{doi}",
+    "10.5465/": "https://journals.aom.org/doi/pdf/{doi}",
+}
 
-    def __init__(self, cache_dir: str | Path = ".cache", max_mb: int = 25, max_pages: int = 40):
+
+def pdf_candidates(rec: dict) -> list[str]:
+    urls = [rec.get("pdf_url")] if rec.get("pdf_url") else []
+    doi = rec.get("doi") or ""
+    for prefix, pattern in PUBLISHER_PDF.items():
+        if doi.startswith(prefix):
+            urls.append(pattern.format(doi=doi))
+    return list(dict.fromkeys(urls))
+
+
+class FullText:
+    """Read PDFs into memory one at a time, keeping only signal counts (no files saved).
+
+    Deliberately slow: a fixed delay between network requests and a hard cap per run,
+    so volume stays at what a single researcher reading papers would generate.
+    """
+
+    def __init__(self, cache_dir: str | Path = ".cache", max_mb: int = 25, max_pages: int = 40,
+                 delay: float = 15.0, limit: int = 40):
         self.path = Path(cache_dir) / "fulltext_signals.json"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.cache: dict = json.loads(self.path.read_text()) if self.path.exists() else {}
         self.max_bytes = max_mb * 1024 * 1024
         self.max_pages = max_pages
+        self.delay = delay
+        self.remaining = limit
+        self._last = 0.0
         self.session = requests.Session()
         self.session.headers["User-Agent"] = "Mozilla/5.0 (paper-classifier research tool)"
 
     def save(self) -> None:
         self.path.write_text(json.dumps(self.cache))
 
-    def signals(self, url: str | None) -> dict[str, int] | None:
-        if not url:
-            return None
-        if url not in self.cache:
-            self.cache[url] = self._fetch(url)
-        return self.cache[url]
+    def signals_for(self, rec: dict) -> dict[str, int] | None:
+        """Try each candidate PDF URL for a paper; returns cached results without network use."""
+        for url in pdf_candidates(rec):
+            if url in self.cache:
+                if self.cache[url]:
+                    return self.cache[url]
+                continue
+            if self.remaining <= 0:
+                return None
+            wait = self.delay - (time.monotonic() - self._last)
+            if wait > 0:
+                time.sleep(wait)
+            self.remaining -= 1
+            self.cache[url] = self._fetch(url)  # no retries: a refusal is recorded, not repeated
+            self._last = time.monotonic()
+            self.save()
+            if self.cache[url]:
+                return self.cache[url]
+        return None
 
     def _fetch(self, url: str) -> dict[str, int] | None:
         from pypdf import PdfReader
